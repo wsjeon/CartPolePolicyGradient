@@ -1,127 +1,182 @@
+import tensorflow as tf
 import numpy as np
 import sys
 import gym
-from tensorflow.contrib import slim
+import tensorflow.contrib.slim as slim
+from tensorflow.contrib.slim import fully_connected as fc
 
-np.random.seed(0)
+flags = tf.app.flags
 
-env = gym.make('CartPole-v0')
-#outdir = sys.argv[1]
-outdir = "./test"
+flags.DEFINE_string("ENVIRONMENT", "CartPole-v0", "environment")
+flags.DEFINE_string("AGENT", "REINFORCE", "agent")
+flags.DEFINE_float("GAMMA", 0.99, "discount factor")
+flags.DEFINE_float("LEARNING_RATE", 0.0001, "learning rate")
+flags.DEFINE_integer("TRAINING_STEP", 5000, "maximum steps for agent-env. interaction")
+flags.DEFINE_integer("TRAINING_EPISODE", 3000, "maximum episodes for agent-env. interaction")
+flags.DEFINE_integer("UPDATE_PERIOD", 10000000, "update_period")
 
-input_layer_size = env.observation_space.shape[0]
-hidden_layer_size = 16
-output_layer_size = env.action_space.n
+def random_choice(prob):
+  # Randomly choose item for given probability.
+  # 
+  # Args:
+  # - prob: probability (2-D list)
+  c = np.cumsum(prob, axis = 1)
+  u = np.random.rand(len(c), 1)
+  
+  return (u < c).argmax(axis = 1)
 
+class GymAgent(object):
+  def __init__(self, env):
+    # Initialize the agent in OpenAI Gym environment.
+    #
+    # Args:
+    # - env: environment
+    self.env = env
+    self.FLAGS = tf.app.flags.FLAGS
 
-def pack(W1, b1, W2, b2):
-  return np.concatenate([W1.flatten(), b1.flatten(), W2.flatten(), b2.flatten()])
+    """ Observation size """
+    self.obs_size = env.observation_space.shape[0]
 
-def unpack(model):
-  shapes = [
-      (input_layer_size, hidden_layer_size),
-      (1, hidden_layer_size),
-      (hidden_layer_size, output_layer_size),
-      (1, output_layer_size),
-  ]
-  result = []
-  start = 0
-  for i, offset in enumerate(np.prod(shape) for shape in shapes):
-    result.append(model[start:start+offset].reshape(shapes[i]))
-    start += offset
-  return result
+    """ Action size """
+    try: # Box
+      self.action_size = env.action_space.shape
+    except AttributeError: # Discrete
+      self.action_size = env.action_space.n
 
+    """ TensorFlow graph construction """
+    self.build_model()
+    self.build_loss()
+    self.build_optimizer()
 
-def sigmoid(x):
-  return 1 / (1 + np.exp(-x))
+    """ Open Tensorflow session and initialize variables """
+    self.sess = tf.Session()
+    self.sess.run(tf.global_variables_initializer())
 
+  def build_model(self):
+    self.obs = tf.placeholder(tf.float32, [None, self.obs_size])
 
-def softmax(x):
-  exp_scores = np.exp(x)
-  return exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
+    def _model(net):
+      with slim.arg_scope([fc], weights_initializer = tf.random_normal_initializer(0.0001)):
+        net = fc(net, 16, activation_fn = tf.nn.sigmoid, scope = 'fc0')
+        net = fc(net, self.action_size, activation_fn = tf.nn.softmax, scope = 'fc1')
+      return net
 
+    self.policy = _model(self.obs)
 
-def forward(model, x):
-  W1, b1, W2, b2 = unpack(model)
-  z1 = x.dot(W1) + b1
-  a1 = sigmoid(z1)
-  z2 = a1.dot(W2) + b2
-  return softmax(z2)
+  def build_loss(self):
+    self.actions = tf.placeholder(tf.int32, [None])
+    self.returns = tf.placeholder(tf.float32, [None])
 
+    def _loss():
+      log_policy = tf.clip_by_value(self.policy, 1e-20, 1.0)
+      actions = tf.one_hot(self.actions, self.action_size)
+      loss = -tf.reduce_sum(tf.reduce_sum(log_policy * actions, axis = 1) * self.returns)
+      return loss
 
-def finite_difference(f, model):
-  numgrad = np.zeros(model.shape)
-  perturb = np.zeros(model.shape)
-  e = 1e-4
-  for i in range(perturb.size):
-    perturb.flat[i] = e
-    loss1 = f(model - perturb)
-    loss2 = f(model + perturb)
-    numgrad.flat[i] = (loss2 - loss1) / (2 * e)
-    perturb.flat[i] = 0
-  return numgrad
+    self.loss = _loss()
 
+  def build_optimizer(self):
+    self.optimizer = tf.train.GradientDescentOptimizer(self.FLAGS.LEARNING_RATE).minimize(self.loss)
 
-def choose_action(action_distribution):
-  r = np.random.random()
-  total = 0
-  for i, p in enumerate(action_distribution):
-    total += p
-    if r <= total:
-      return i
+  def act(self, obs):
+    # Choose action based on observation.
+    #
+    # Args:
+    # - obs: observation
+    # - Note that single observation is assumed here.
+    policy = self.sess.run(self.policy, feed_dict = {self.obs: [obs]})
+    action = random_choice(policy)
 
+    return int(action[0])
+
+  def learn(self, mode = 0):
+    # Args:
+    # - mode: training mode
+    FLAGS = self.FLAGS
+    training_step = FLAGS.TRAINING_STEP
+
+    n_step_episode = 0
+    n_episode = 0
+    n_total_step = 0
+    expr_buf = [[], [], [], [], []]
+
+    def _insert_expr(expr_buf, *expr):
+      for i in range(len(expr)):
+        expr_buf[i].append(expr[i])
+      return expr_buf
+
+    def _episode_ends(obs, n_total_step, n_episode, n_step_episode):
+      print "training\t|step: {0}\t|episode: {1}\t|length: {2}".format(
+          n_total_step, n_episode, n_step_episode)
+      obs = self.env.reset()
+      return obs, n_total_step, n_episode + 1, 0
+
+    env = self.env
+    obs = env.reset()
+
+    if mode == 1:
+      for episode in range(FLAGS.TRAINING_EPISODE):
+        while True:
+          action = self.act(obs)
+          obs_n, reward, done, _ = env.step(action)
+          expr_buf = _insert_expr(expr_buf, obs, action, reward, obs_n, done)
+          if len(expr_buf[0]) >= FLAGS.UPDATE_PERIOD or done\
+              or n_step_episode >= env.spec.timestep_limit:
+            self.update(expr_buf)
+            expr_buf = [[], [], [], [], []]
+          obs = obs_n
+
+          n_step_episode += 1
+          n_total_step += 1
+
+          if done or n_step_episode >= env.spec.timestep_limit:
+            break
+
+        obs, n_total_step, n_episode, n_step_episode =\
+            _episode_ends(obs, n_total_step, n_episode, n_step_episode)
+
+    else:
+      raise NotImplementedError()
+
+  def update(self, expr_buf):
+    # REINFORCE without baseline
+    FLAGS = self.FLAGS
+
+    rewards = np.array(expr_buf[2])
+    rewards = rewards * (FLAGS.GAMMA ** np.arange(len(rewards)))
+    returns = rewards[::-1].cumsum()[::-1]
+#    try:
+#      self.baseline.append(returns[0])
+#    except AttributeError:
+#      self.baseline = []
+#      self.baseline.append(returns[0])
+#
+#    self.baseline = self.baseline[-100:]
+#    baseline = sum(self.baseline) / len(self.baseline)
+#
+    for i in range(len(expr_buf[0])):
+      feed_dict = {self.obs: [expr_buf[0][i]],
+                   self.actions: [expr_buf[1][i]],
+                   self.returns: [returns[i]]}
+      self.sess.run(self.optimizer, feed_dict = feed_dict)
 
 def main():
-  W1 = np.random.randn(input_layer_size, hidden_layer_size) / np.sqrt(input_layer_size)
-  b1 = np.zeros((1, hidden_layer_size))
-  W2 = np.random.randn(hidden_layer_size, output_layer_size) / np.sqrt(hidden_layer_size)
-  b2 = np.zeros((1, output_layer_size))
-  model = pack(W1, b1, W2, b2)
+  """ Environment setting """
+  env = gym.make("CartPole-v0")
+  input_layer_size = env.observation_space.shape[0]
+  hidden_layer_size = 16
 
-  discount_factor = 0.98
-  gradient_step_size = 0.001
-  rewards = []
+  """ Agent setting """
+  agent = GymAgent(env)
 
-  for episode in range(3000):
-    observation = env.reset()
+  """ Learning """
+  # mode: 0
+  # - Use FLAGS.TRAINING_STEP.
+  # mode: 1
+  # - Use FLAGS.TRAINING_EPISODE.
+  agent.learn(mode = 1)
 
-    observed_states = []
-    executed_actions = []
-    observed_rewards = []
-
-    step = 0
-    while True:
-      step += 1
-
-      observed_states.append(observation)
-      action_distribution = forward(model, np.array([observation]))[0]
-
-      action = choose_action(action_distribution)
-
-      observation, reward, done, info = env.step(action)
-      executed_actions.append(action)
-      observed_rewards.append(reward)
-
-      if done or step > env.spec.timestep_limit:
-        print 'finished episode', episode, 'steps', step
-        break
-
-    steps = step
-
-    discounted_rewards = observed_rewards * np.power(discount_factor, np.arange(steps))
-
-    rewards.append(discounted_rewards.sum())
-    rewards = rewards[-100:]
-    baseline = sum(rewards) / len(rewards)
-
-    def log_policy(model):
-      action_distribution = forward(model, np.array(observed_states))
-      executed_action_probability = action_distribution[np.arange(len(executed_actions)), executed_actions]
-      return np.sum(np.log(executed_action_probability))
-
-    gradient_estimate = finite_difference(log_policy, model) * (discounted_rewards.sum() - baseline)
-    # print 'gradient_estimate_magnitude', np.sqrt((gradient_estimate ** 2).sum())
-    model += gradient_step_size * gradient_estimate
+  agent.sess.close()
 
 if __name__ == "__main__":
   main()
