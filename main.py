@@ -7,9 +7,10 @@ flags = tf.app.flags
 flags.DEFINE_string("ENVIRONMENT", "CartPole-v0", "environment")
 flags.DEFINE_string("AGENT", "reinforce", "agent")
 flags.DEFINE_float("GAMMA", 0.98, "discount factor")
-flags.DEFINE_float("LEARNING_RATE", 0.01, "learning rate")
+flags.DEFINE_float("LEARNING_RATE", 0.001, "learning rate")
 flags.DEFINE_integer("TRAINING_STEP", 5000, "maximum steps for agent-env. interaction")
-flags.DEFINE_integer("TRAINING_EPISODE", 2000, "maximum episodes for agent-env. interaction")
+flags.DEFINE_integer("TRAINING_EPISODE", 3000, "maximum episodes for agent-env. interaction")
+flags.DEFINE_string("SUMMARY_DIR", "./tmp", "directory to save summaries")
 
 FLAGS = flags.FLAGS
 
@@ -26,8 +27,9 @@ def main():
   # - Use FLAGS.TRAINING_STEP.
   # mode: 1
   # - Use FLAGS.TRAINING_EPISODE.
-  agent.learn(mode = 1, monitor = True)
+  agent.learn()
   agent.sess.close()
 
 if __name__ == "__main__":
-  main()
+  for i in range(10):
+    main()

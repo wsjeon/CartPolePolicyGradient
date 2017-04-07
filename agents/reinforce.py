@@ -40,8 +40,7 @@ class REINFORCE(GymAgent):
     self.loss = _loss()
 
   def build_optimizer(self):
-    opt = tf.train.RMSPropOptimizer(self.FLAGS.LEARNING_RATE)
-
+    opt = tf.train.GradientDescentOptimizer(self.FLAGS.LEARNING_RATE)
     self.optimizer = opt.minimize(self.loss)
 
   def update(self, expr_buf):
@@ -74,26 +73,25 @@ class REINFORCE(GymAgent):
     policy = self.sess.run(self.policy, feed_dict = {self.obs: [obs]})
     return np.random.choice(self.action_size, p = policy[0])
 
-  def learn(self, mode = 0, monitor = False, monitor_dir = "./monitor"):
+  def learn(self, mode = 1, monitor = False, monitor_dir = "./monitor"):
     # Args:
     # - mode: training mode
     FLAGS = self.FLAGS
-
-    n_step_episode = 0
-    n_episode = 0
-    n_total_step = 0
-    expr_buf = [[], [], [], [], []]
 
     def _insert_expr(expr_buf, *expr):
       for i in range(len(expr)):
         expr_buf[i].append(expr[i])
       return expr_buf
 
-    def _episode_ends(obs, n_total_step, n_episode, n_step_episode):
-      print "training\t|step: {0}\t|episode: {1}\t|length: {2}".format(
-          n_total_step, n_episode, n_step_episode)
+    def _episode_ends(obs, n_total_step, n_episode, n_step_episode, return_episode):
+      print "training\t|step: {0}\t|episode: {1}\t|length: {2}\t|return: {3}".format(
+          n_total_step, n_episode, n_step_episode, return_episode)
+      summary_str = self.sess.run(self.summary_op, feed_dict = {self.return_episode: return_episode})
+      self.summary_writer.add_summary(summary_str, n_episode)
+      self.summary_writer.flush()
+
       obs = self.env.reset()
-      return obs, n_total_step, n_episode + 1, 0
+      return obs, n_total_step, n_episode + 1, 0, 0.0
 
     env = self.env
 
@@ -102,8 +100,14 @@ class REINFORCE(GymAgent):
 
     obs = env.reset()
 
+    n_total_step = 0
+    n_episode = 0
+    n_step_episode = 0
+    expr_buf = [[], [], [], [], []]
+
     if mode == 1:
       for episode in range(FLAGS.TRAINING_EPISODE):
+        return_episode = 0.0
         while True:
           action = self.act(obs)
           obs_n, reward, done, _ = env.step(action)
@@ -113,14 +117,15 @@ class REINFORCE(GymAgent):
             expr_buf = [[], [], [], [], []]
           obs = obs_n
 
-          n_step_episode += 1
           n_total_step += 1
+          n_step_episode += 1
+          return_episode += reward
 
           if done or n_step_episode >= env.spec.timestep_limit:
             break
 
-        obs, n_total_step, n_episode, n_step_episode =\
-            _episode_ends(obs, n_total_step, n_episode, n_step_episode)
+        obs, n_total_step, n_episode, n_step_episode, return_episode =\
+            _episode_ends(obs, n_total_step, n_episode, n_step_episode, return_episode)
 
     else:
       raise NotImplementedError()

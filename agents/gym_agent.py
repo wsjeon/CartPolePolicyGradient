@@ -1,4 +1,5 @@
 import tensorflow as tf
+import os
 
 class GymAgent(object):
   def __init__(self, env):
@@ -22,6 +23,7 @@ class GymAgent(object):
     self.build_net()
     self.build_loss()
     self.build_optimizer()
+    self.build_summary()
 
     """ Open Tensorflow session and initialize variables """
     self.sess = tf.Session()
@@ -35,6 +37,20 @@ class GymAgent(object):
 
   def build_optimizer(self):
     raise NotImplementedError()
+
+  def build_summary(self):
+    self.return_episode = tf.placeholder(tf.float32)
+    tf.summary.scalar("score", self.return_episode)
+    self.summary_op = tf.summary.merge_all()
+
+    run_count = 0
+    while True:
+      tmp_dir = os.path.join(self.FLAGS.SUMMARY_DIR, "run{}".format(int(run_count)))
+      if os.path.exists(tmp_dir):
+        run_count += 1
+      else:
+        break
+    self.summary_writer = tf.summary.FileWriter(tmp_dir)
 
   def update(self):
     raise NotImplementedError()
